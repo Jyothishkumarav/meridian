@@ -7,7 +7,9 @@ from flask import Flask, request
 from flask_restx import Api, Resource, fields
 from flask_swagger_ui import get_swaggerui_blueprint
 
+from meridian_api import app_config
 from meridian_api.startup_handler import StartupHandler
+from lidar_service import start_lidar, stop_lidar
 
 app = Flask(__name__)
 
@@ -37,6 +39,7 @@ sensor_processes = {}
 # Namespace for sensors
 sensor_ns = api.namespace('sensors', description='Sensor operations')
 
+
 @sensor_ns.route('/control')
 class SensorControlResource(Resource):
     @api.expect(api.model('SensorControlInput', {
@@ -57,62 +60,61 @@ class SensorControlResource(Resource):
         elif action == 'stop':
             result = self.stop_sensor(sensor_type)
 
-        return {'message': result}
+        return result
 
     def start_sensor(self, sensor_type):
         # Execute a command to start a sensor process based on sensor type
-        if sensor_type == 'lidar':
-            command = self.start_lidar()
-        elif sensor_type == 'camera':
-            command = './start_camera_sensor.sh'
-        elif sensor_type == 'imu':
-            command = './start_imu_sensor.sh'
-        else:
-            return f'Unsupported sensor type: {sensor_type}'
+        if 'PROJECT_NAME' not in app_config:
+            return {'error': 'Project name not set. Set project name using the createfolder API.'}, 400
 
         try:
-            subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return f'{sensor_type} sensor started successfully.'
+            if sensor_type == 'lidar':
+                msg = self.start_lidar_service()
+            elif sensor_type == 'camera':
+                msg = './start_camera_sensor.sh'
+            elif sensor_type == 'imu':
+                msg = './start_imu_sensor.sh'
+            else:
+                return f'Unsupported sensor type: {sensor_type}'
+            return msg
         except Exception as e:
             return f'Error starting {sensor_type} sensor: {str(e)}'
 
     def stop_sensor(self, sensor_type):
         # Execute a command to stop a sensor process based on sensor type
-        if sensor_type == 'lidar':
-            command = self.stop_lidar()
-        elif sensor_type == 'camera':
-            command = './stop_camera_sensor.sh'
-        elif sensor_type == 'imu':
-            command = './stop_imu_sensor.sh'
-        else:
-            return f'Unsupported sensor type: {sensor_type}'
-
         try:
-            subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return f'{sensor_type} sensor stopped successfully.'
+            if sensor_type == 'lidar':
+                msg = self.stop_lidar_service()
+            elif sensor_type == 'camera':
+                msg = './stop_camera_sensor.sh'
+            elif sensor_type == 'imu':
+                msg = './stop_imu_sensor.sh'
+            else:
+                return f'Unsupported sensor type: {sensor_type}'
+
+            return msg
         except Exception as e:
             return f'Error stopping {sensor_type} sensor: {str(e)}'
-    def start_lidar(self):
+
+    def start_lidar_service(self):
         global sensor_processes
-        command = ['sudo', 'tcpdump', '-i', 'wlp1s0', 'tcp']
         try:
             # Run the command in the background
-            lidar_sensor_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                              preexec_fn=os.setsid)
+            parent_folder_path = app_config['PROJECT_NAME']
+            lidar_sensor_process = start_lidar(parent_folder_path)
             sensor_processes['lidar'] = lidar_sensor_process
             return {'message': 'Sensor process started successfully.'}
         except Exception as e:
             return {'error': f'Error starting sensor process: {str(e)}'}, 500
 
-    def stop_lidar(self):
+    def stop_lidar_service(self):
         global sensor_processes
         sensor_type = 'lidar'
         if sensor_type in sensor_processes and sensor_processes[sensor_type].poll() is None:
             try:
                 # Send a signal to terminate the sensor process
-                os.killpg(os.getpgid(sensor_processes[sensor_type].pid), signal.SIGTERM)
-                sensor_processes[sensor_type].wait()
-                return {'message': f'Sensor process for {sensor_type} stopped successfully.'}
+                msg = stop_lidar(sensor_processes[sensor_type])
+                return msg
             except Exception as e:
                 return {'error': f'Error stopping sensor process for {sensor_type}: {str(e)}'}, 500
         else:
@@ -128,8 +130,10 @@ def run_startup_script():
     except Exception as e:
         print(f'Error executing startup script: {str(e)}')
 
+
 # Namespace for folders
 folder_ns = api.namespace('folders', description='Folder operations')
+
 
 @folder_ns.route('/')
 class FolderResource(Resource):
@@ -151,16 +155,16 @@ class FolderResource(Resource):
         for subfolder in subfolders:
             subfolder_path = os.path.join(main_folder_path, f'{subfolder}')
             os.makedirs(subfolder_path, exist_ok=True)
-
+        app_config['PROJECT_NAME'] = main_folder_path
         return {'message': f'Folder "{folder_name}" and subfolders created successfully.'}
 
 
-@folder_ns.route('/update-parent-folder')
+@folder_ns.route('/parent-folder')
 class UpdateParentFolderResource(Resource):
     @api.expect(api.model('UpdateParentFolderInput', {
         'new_parent_folder': fields.String(required=True, description='New parent folder path')
     }))
-    def post(self):
+    def put(self):
         """Update the parent folder path in the configuration"""
         data = request.json
         new_parent_folder = data['new_parent_folder']
@@ -171,6 +175,7 @@ class UpdateParentFolderResource(Resource):
             config.write(config_file)
 
         return {'message': f'Parent folder updated to: {new_parent_folder}'}
+
 
 if __name__ == '__main__':
     app.run(debug=True)
