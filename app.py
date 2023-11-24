@@ -1,13 +1,14 @@
 import os
-import signal
-import subprocess
 from configparser import ConfigParser
 
 from flask import Flask, request
 from flask_restx import Api, Resource, fields
 from flask_swagger_ui import get_swaggerui_blueprint
 
+from config import ROS_CORE
+from main import start_roscore
 from meridian_api import app_config
+from meridian_api.roscore_service import stop_roscore
 from meridian_api.startup_handler import StartupHandler
 from meridian_api.lidar_service import start_lidar, stop_lidar
 
@@ -74,6 +75,8 @@ class SensorControlResource(Resource):
                 msg = './start_camera_sensor.sh'
             elif sensor_type == 'imu':
                 msg = './start_imu_sensor.sh'
+            elif sensor_type == ROS_CORE:
+                msg = self.start_ros_core()
             else:
                 return f'Unsupported sensor type: {sensor_type}'
             return msg
@@ -89,6 +92,8 @@ class SensorControlResource(Resource):
                 msg = './stop_camera_sensor.sh'
             elif sensor_type == 'imu':
                 msg = './stop_imu_sensor.sh'
+            elif sensor_type == ROS_CORE:
+                msg = self.stop_ros_core()
             else:
                 return f'Unsupported sensor type: {sensor_type}'
 
@@ -101,24 +106,49 @@ class SensorControlResource(Resource):
         try:
             # Run the command in the background
             parent_folder_path = app_config['PROJECT_NAME']
-            lidar_sensor_process = start_lidar(parent_folder_path)
+            lidar_sensor_process, msg = start_lidar(parent_folder_path)
             sensor_processes['lidar'] = lidar_sensor_process
-            return {'message': 'Sensor process started successfully.'}
+            return {'message': msg}
         except Exception as e:
             return {'error': f'Error starting sensor process: {str(e)}'}, 500
 
     def stop_lidar_service(self):
         global sensor_processes
         sensor_type = 'lidar'
-        if sensor_type in sensor_processes and sensor_processes[sensor_type].poll() is None:
+        if sensor_type in sensor_processes and sensor_processes[sensor_type] is not None:
             try:
                 # Send a signal to terminate the sensor process
                 msg = stop_lidar(sensor_processes[sensor_type])
+                sensor_processes.pop(sensor_type)
                 return msg
             except Exception as e:
                 return {'error': f'Error stopping sensor process for {sensor_type}: {str(e)}'}, 500
         else:
             return {'error': f'No running sensor process for {sensor_type} to stop.'}, 400
+
+    def start_ros_core(self):
+        global sensor_processes
+        try:
+            # Run the command in the background
+            ros_core_process, msg = start_roscore()
+            sensor_processes[ROS_CORE] = ros_core_process
+            return {'message': msg}
+        except Exception as e:
+            return {'error': f'Error starting sensor process: {str(e)}'}, 500
+
+    def stop_ros_core(self):
+        global sensor_processes
+        sensor_type = ROS_CORE
+        if sensor_type in sensor_processes and sensor_processes[sensor_type] is not None:
+            try:
+                # Send a signal to terminate the sensor process
+                msg = stop_roscore(sensor_processes[sensor_type])
+                sensor_processes.pop(sensor_type)
+                return msg
+            except Exception as e:
+                return {'error': f'Error stopping ros core process for {sensor_type}: {str(e)}'}, 500
+        else:
+            return {'error': f'No running ros core process for {sensor_type} to stop.'}, 400
 
 
 # Execute a bash script when the Flask application starts
@@ -164,7 +194,6 @@ class UpdateParentFolderResource(Resource):
     @api.expect(api.model('UpdateParentFolderInput', {
         'new_parent_folder': fields.String(required=True, description='New parent folder path')
     }))
-
     def put(self):
         """Update the parent folder path in the configuration"""
         data = request.json
